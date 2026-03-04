@@ -20,20 +20,6 @@ def timeit(action="Timing"):
     elapsed_time = time.time()-start_time
     print(f"{action} completed. Elapsed time: {elapsed_time:.2f}s\n")
 
-def evaluate_model(model, name, feat_test, y_test):
-    """ Evaluate a classification model on the test set, then print and plot metrics. """
-    # Make prediction from features
-    pred_test = model.predict(feat_test)
-    
-    print(f"[ Evaluation result for {name} ]")
-    # Print classification report
-    print("Classification report:")
-    print(classification_report(y_test, pred_test))
-    
-    # Print confusion matrix
-    print("Confusion matrix:")
-    print(confusion_matrix(y_test, pred_test), "\n")
-
 # Name: recall_at_fixed_fpr
 # Description: Calculate recall at a specific false positive rate (FPR) threshold. (Defaults to 1% FPR)
 def recall_at_fixed_fpr(y_true, y_scores, target_fpr=0.01):
