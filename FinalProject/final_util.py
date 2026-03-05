@@ -1,7 +1,7 @@
 import time
 from contextlib import contextmanager
 from turtle import pd
-
+import math
 
 import os
 import numpy as np
@@ -69,13 +69,13 @@ def select_threshold_at_fpr(y_true, y_scores, target_fpr=0.01):
 #              and filters out 'Background' traffic to ensure clean labels.
 def load_and_clean_binetflow(DATA_DIR, filename):
     path = os.path.join(DATA_DIR, filename)
-    print(f"Loading {filename}...")
+    #print(f"Loading {filename}...")
     df = pd.read_csv(path)
     df.columns = df.columns.str.strip()
     initial_count = len(df)
     df = df[df['Label'].str.contains('Botnet|Normal', case=False, na=False)].copy()
     
-    print(f"Filtered {initial_count - len(df)} background rows. {len(df)} rows remaining.")
+    #print(f"Filtered {initial_count - len(df)} background rows. {len(df)} rows remaining.")
     return df
 
 # Name : process_labels
@@ -184,10 +184,10 @@ def evaluate_model_performance(
         thresholds,      # The FPR thresholds to evaluate at
         scaler,          # The fitted scaler from the training data (used to transform new scenario features)
         DROP_COLUMNS,     # The list of columns to drop from the feature matrix
-        device           # The device (CPU or GPU) to run the autoencoder evaluation on
+        device,           # The device (CPU or GPU) to run the autoencoder evaluation on
+        return_results = False # Whether to return the recall values for plotting outside the function (used in multi-scenario evaluation)
         ):
     
-    print(f"--- Cross-Scenario Performance on {scenario_name} (Unseen) ---")
     # Sections 1-4: Load, Process, and Prepare the new scenario
     scenario_raw = load_and_clean_binetflow("./", data)
     processed_df = process_labels(scenario_raw)
@@ -201,7 +201,7 @@ def evaluate_model_performance(
     X = X[X_train.columns]
     X_scaled = scaler.transform(X)
 
-    print(f"--- {scenario_name} Performance at Various FPR Thresholds ---")
+    print(f"--- Cross-Scenario Performance on{scenario_name} at Various FPR Thresholds ---")
     for thresh in thresholds:
         # Evaluate Logistic Regression
         log_probs = log_model.predict_proba(X_scaled)[:, 1]
@@ -225,23 +225,26 @@ def evaluate_model_performance(
         ae_auc = roc_auc_score(y, mse_scores)
         ae_recall = recall_at_fixed_fpr(y, mse_scores, target_fpr=thresh)
         print(f"FPR Threshold: {thresh:.3%} | Logistic Recall: {log_recall:.2%} | RF Recall: {rf_recall:.2%} | XGB Recall: {xgb_recall:.2%} | AE Recall: {ae_recall:.2%}")
-
-    print("\n")
+    
     print(f"--- Summary for {scenario_name} ---")
     print(f"Logistic Regression ROC-AUC: {log_auc:.4f}")
     print(f"Random Forest ROC-AUC: {rf_auc:.4f}")
     print(f"XGBoost ROC-AUC: {xgb_auc:.4f}")
     print(f"Autoencoder ROC-AUC: {ae_auc:.4f}")
+    print("\n")
 
     #plot the results for better visualization
     # return the the plot values so that they can be plotted outside the function
-    return {
+    results = {
         'thresholds': thresholds,
         'log_recall': [recall_at_fixed_fpr(y, log_probs, target_fpr=t) for t in thresholds],
         'rf_recall': [recall_at_fixed_fpr(y, rf_probs, target_fpr=t) for t in thresholds],
         'xgb_recall': [recall_at_fixed_fpr(y, xgb_probs, target_fpr=t) for t in thresholds],
         'ae_recall': [recall_at_fixed_fpr(y, mse_scores, target_fpr=t) for t in thresholds]
     }
+
+    if return_results:
+        return results
 
     plt.figure(figsize=(10, 6))
     plt.plot(thresholds, [recall_at_fixed_fpr(y, log_probs, target_fpr=t) for t in thresholds], marker='o', label='Logistic Regression')
@@ -256,32 +259,74 @@ def evaluate_model_performance(
     plt.grid(True)
     plt.show()
 
-def evaluate_and_plot_multiple_scenarios(scenarios, thresholds, DROP_COLUMNS, RANDOM_STATE, device):
+# Name: evaluate_and_plot_multiple_scenarios
+# Description: This function takes a list of scenarios and calls the evaluate_model_performance function for each scenario, printing them in a 1 by X plot, where x is the number of scenarios using the plot_Xnum_recall_curves method. 
+def evaluate_and_plot_multiple_scenarios(
+        scenarios,          # List of (scenario_name, filename)
+        X_train,
+        log_model,
+        rf_model,
+        xgb_model,
+        aut_enc_model,
+        aut_dec_model,
+        thresholds,
+        scaler,
+        DROP_COLUMNS,
+        device
+    ):
+
     performance_dict = {}
-    for i, (scenario_name, data) in enumerate(scenarios):
-        X_train, log_model, rf_model, xgb_model, enc_model, dec_model, scaler = train_data(
-            scenario_name, data, DROP_COLUMNS, RANDOM_STATE
+
+    # Evaluate each scenario
+    for scenario_name, data in scenarios:
+
+        performance_dict[scenario_name] = evaluate_model_performance(
+            scenario_name=scenario_name,
+            data=data,
+            X_train=X_train,
+            log_model=log_model,
+            rf_model=rf_model,
+            xgb_model=xgb_model,
+            aut_enc_model=aut_enc_model,
+            aut_dec_model=aut_dec_model,
+            thresholds=thresholds,
+            scaler=scaler,
+            DROP_COLUMNS=DROP_COLUMNS,
+            device=device,
+            return_results=True
         )
-        performance_dict[i] = evaluate_model_performance(
-            scenario_name, data, X_train, log_model, rf_model, xgb_model,
-            enc_model, dec_model, thresholds, scaler, DROP_COLUMNS, device
-        )
-    plot_Xnum_recall_curves(len(scenarios), performance_dict, "All Scenarios")
-    
-def plot_Xnum_recall_curves(numplots, performance_dict, scenario_name):
-    plt.figure(figsize=(10, 6))
-    for i in range(numplots):
-        plt.plot(performance_dict[i]['thresholds'], performance_dict[i]['log_recall'], marker='o', label=f'Logistic Regression - {scenario_name} {i+1}')
-        plt.plot(performance_dict[i]['thresholds'], performance_dict[i]['rf_recall'], marker='o', label=f'Random Forest - {scenario_name} {i+1}')
-        plt.plot(performance_dict[i]['thresholds'], performance_dict[i]['xgb_recall'], marker='o', label=f'XGBoost - {scenario_name} {i+1}')
-        plt.plot(performance_dict[i]['thresholds'], performance_dict[i]['ae_recall'], marker='o', label=f'Autoencoder - {scenario_name} {i+1}')
-    
-    plt.xscale('log')
-    plt.xlabel('False Positive Rate Threshold')
-    plt.ylabel('Recall')
-    plt.title(f'Recall at Various FPR Thresholds ({scenario_name})')
-    plt.legend()
-    plt.grid(True)
+
+    # Plot in 2 x 2 (or dynamic grid)
+    numplots = len(performance_dict)
+
+    cols = 2
+    rows = math.ceil(numplots / cols)
+
+    fig, axes = plt.subplots(rows, cols, figsize=(6 * cols, 5 * rows), sharey=True)
+
+    # Flatten axes for easy iteration
+    axes = axes.flatten()
+
+    for ax, (scenario_name, perf) in zip(axes, performance_dict.items()):
+
+        ax.plot(perf['thresholds'], perf['log_recall'], marker='o', label='Logistic Regression')
+        ax.plot(perf['thresholds'], perf['rf_recall'], marker='o', label='Random Forest')
+        ax.plot(perf['thresholds'], perf['xgb_recall'], marker='o', label='XGBoost')
+        ax.plot(perf['thresholds'], perf['ae_recall'], marker='o', label='Autoencoder')
+
+        ax.set_xscale('log')
+        ax.set_title(scenario_name)
+        ax.set_xlabel("False Positive Rate Threshold")
+        ax.grid(True)
+
+    # Hide unused subplots if any
+    for i in range(len(performance_dict), len(axes)):
+        axes[i].set_visible(False)
+
+    axes[0].set_ylabel("Recall")
+    axes[0].legend()
+
+    plt.tight_layout()
     plt.show()
 
 # Name: train_data
