@@ -194,14 +194,21 @@ def evaluate_model_performance(
     engineered_df = feature_engineering(processed_df)
     X, y = prepare_features(engineered_df, DROP_COLUMNS=DROP_COLUMNS)
     
+    # Ensure all columns are numeric before proceeding
+    X = X.apply(pd.to_numeric, errors='coerce').fillna(0)
+    
     # Handle missing columns and order
     for col in X_train.columns:
         if col not in X.columns:
             X[col] = 0  # Fill missing one-hot columns with 0
     X = X[X_train.columns]
+    
+    # Ensure all columns are numeric (catch any remaining non-numeric columns)
+    X = X.apply(pd.to_numeric, errors='coerce').fillna(0)
+   
     X_scaled = scaler.transform(X)
 
-    print(f"--- Cross-Scenario Performance on{scenario_name} at Various FPR Thresholds ---")
+    print(f"--- Cross-Scenario Performance on {scenario_name} at Various FPR Thresholds ---")
     for thresh in thresholds:
         # Evaluate Logistic Regression
         log_probs = log_model.predict_proba(X_scaled)[:, 1]
@@ -332,17 +339,20 @@ def evaluate_and_plot_multiple_scenarios(
 # Name: train_data
 # Description: General Train method for all scenarios
 def train_data (
-        scensario_name, # The name of the scenario being evaluated (e.g., "Scenario 1")
+        scenario_name, # The name of the scenario being evaluated (e.g., "Scenario 1")
         data,           # The raw .binetflow file for the scenario (e.g., "capture20110810.binetflow")
         DROP_COLUMNS,   # The list of columns to drop from the feature matrix (e.g., ['SrcAddr', 'DstAddr', 'Label'])
         RANDOM_STATE    # A fixed random state for reproducibility (e.g., 42)
 ):
-    print(f"--- Training on {scensario_name} ---")
+    print(f"--- Training on {scenario_name} ---")
     # Sections 1-4: Load, Process, and Prepare the new scenario
     scenario_raw = load_and_clean_binetflow("./", data)
     processed_df = process_labels(scenario_raw)
     engineered_df = feature_engineering(processed_df)
     X, y = prepare_features(engineered_df, DROP_COLUMNS=DROP_COLUMNS)
+    
+    # Ensure all columns are numeric before proceeding
+    X = X.apply(pd.to_numeric, errors='coerce').fillna(0)
     
     # Section 5: Train-test split (80/20) with stratification
     X_train, X_test, y_train, y_test = train_test_split(
@@ -413,5 +423,5 @@ def train_data (
             n_epochs=50, batch_size=256, l2_reg_factor=0.001, device=device
         )
     
-    print(f"--- Training on {scensario_name} complete ---\n")
+    print(f"--- Training on {scenario_name} complete ---\n")
     return X_train, log_model, rf_model, xgb_model, enc_model, dec_model, scaler
