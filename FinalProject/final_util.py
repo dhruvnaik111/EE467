@@ -9,7 +9,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import RobustScaler
 from sklearn.metrics import (
     roc_auc_score,
     average_precision_score,
@@ -91,19 +91,34 @@ def process_labels(df):
 
 # Name: feature_engineering
 # Description: Takes a DataFrame and creates rate-based features
+# (bytes per second and packets per second) using one-hot encoding from the 'Proto' column.
 def feature_engineering(df):
     df = df.copy()
     
-    # Create rate-based features using CTU-13 column names
+    # Existing rate-based features
     df['bytes_per_sec'] = df['TotBytes'] / (df['Dur'] + 1e-6)
     df['pkts_per_sec'] = df['TotPkts'] / (df['Dur'] + 1e-6)
     
-    # One-hot encode the 'Proto' column, which indicates the protocol (e.g., TCP, UDP, ICMP)
+    # NEW: Structural ratio features (highly effective across scenarios)
+    df['bytes_per_pkt'] = df['TotBytes'] / (df['TotPkts'] + 1e-6)
+    df['src_bytes_ratio'] = df['SrcBytes'] / (df['TotBytes'] + 1e-6)
+    
+    # Handle Categorical Text Data: 'Proto'
     if 'Proto' in df.columns:
         df['Proto'] = df['Proto'].apply(lambda x: x if x in ['tcp', 'udp', 'icmp'] else 'other')
         proto_dummies = pd.get_dummies(df['Proto'], prefix='proto', dtype=int)
         df = pd.concat([df, proto_dummies], axis=1)
         df = df.drop(columns=['Proto'])
+        
+    # NEW: Handle Categorical Text Data: 'State' 
+    # (Be sure to remove 'State' from your DROP_COLUMNS list above this function!)
+    if 'State' in df.columns:
+        # Keep top 5 most common states, map the rest to 'other'
+        top_states = df['State'].value_counts().nlargest(5).index
+        df['State'] = df['State'].apply(lambda x: x if x in top_states else 'other')
+        state_dummies = pd.get_dummies(df['State'], prefix='state', dtype=int)
+        df = pd.concat([df, state_dummies], axis=1)
+        df = df.drop(columns=['State'])
         
     return df
 
@@ -115,11 +130,15 @@ def prepare_features(df, DROP_COLUMNS):
     y = df_cleaned['binary_label']
     return X, y
 
+import torch.nn.functional as f
+
 # Name: make_ae_models
-# Description: This function creates and returns both encoder and decoder PyTorch models for an autoencoder
+# Description: Creates and returns both encoder and decoder PyTorch models for an autoencoder
 def make_ae_models(feat_dims, hidden_dims, bottleneck_dims, activation=nn.GELU, dropout_ratio=0.1, device="cpu"):
     encoder_model = nn.Sequential(
+        nn.Dropout(dropout_ratio),  # NEW: Denoising input layer
         nn.Linear(feat_dims, hidden_dims),
+        nn.BatchNorm1d(hidden_dims), # NEW: Batch Normalization
         activation(),
         nn.Dropout(dropout_ratio),
         nn.Linear(hidden_dims, bottleneck_dims),
@@ -127,24 +146,27 @@ def make_ae_models(feat_dims, hidden_dims, bottleneck_dims, activation=nn.GELU, 
 
     decoder_model = nn.Sequential(
         nn.Linear(bottleneck_dims, hidden_dims),
-        nn.Dropout(dropout_ratio),
+        nn.BatchNorm1d(hidden_dims), # NEW: Batch Normalization
         activation(),
+        nn.Dropout(dropout_ratio),
         nn.Linear(hidden_dims, feat_dims),
     ).to(device)
 
     return encoder_model, decoder_model
 
 # Name: autoencoder_loss
-# Description: This function computes the Mean Squared Error (MSE) loss between the original features and the reconstructed features from the autoencoder. 
-# It also adds an L2 regularization term on the bottleneck features to encourage smaller values.
+# Description: Computes the Huber loss between the original features and the reconstructed features.
 def autoencoder_loss(feats, reconstructs, bottlenecks=None, l2_reg_factor=None):
-    mse_loss = f.mse_loss(reconstructs, feats)
+    # NEW: Swapped MSE for Huber Loss to handle extreme network traffic outliers
+    huber_loss = f.huber_loss(reconstructs, feats, delta=1.0)
+    
     if l2_reg_factor:
         l2_reg_loss = bottlenecks.square().sum(-1).mean()
-        total_loss = mse_loss + l2_reg_factor * l2_reg_loss
+        total_loss = huber_loss + l2_reg_factor * l2_reg_loss
     else:
-        total_loss = mse_loss
-    return total_loss, mse_loss
+        total_loss = huber_loss
+        
+    return total_loss, huber_loss
 
 # Name: train_autoencoder
 # Description: This function implements the training loop for the autoencoder. 
@@ -158,13 +180,16 @@ def train_autoencoder(encoder_model, decoder_model, optimizer, feats, n_epochs, 
         
         for (feats_batch,) in loader:
             feats_batch = feats_batch.to(device)
+
             # Forward pass
             bottlenecks = encoder_model(feats_batch)
             reconstructs = decoder_model(bottlenecks)
+            
             # Compute loss
-            total_loss_batch, mse_loss_batch = autoencoder_loss(
+            total_loss_batch, step_loss_batch = autoencoder_loss(
                 feats_batch, reconstructs, bottlenecks, l2_reg_factor
             )
+
             # Backward pass
             total_loss_batch.backward()
             optimizer.step()
@@ -363,7 +388,7 @@ def train_data (
     )
 
     # Section 6: Scaling and Class Weights
-    scaler = StandardScaler()
+    scaler = RobustScaler() 
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
     classes = np.unique(y_train)
@@ -396,7 +421,7 @@ def train_data (
     scale_pos = neg_cases / pos_cases
     xgb_model = xgb.XGBClassifier(
         n_estimators=300,
-        max_depth=6,
+        max_depth=3,
         learning_rate=0.05,
         scale_pos_weight=scale_pos,
         random_state=RANDOM_STATE,
@@ -410,8 +435,8 @@ def train_data (
     input_dim = X_train_scaled.shape[1]
     enc_model, dec_model = make_ae_models(
         feat_dims=input_dim,
-        hidden_dims=16,
-        bottleneck_dims=8,
+        hidden_dims=8,
+        bottleneck_dims=3,
         activation=nn.GELU,
         dropout_ratio=0.1,
         device=device
